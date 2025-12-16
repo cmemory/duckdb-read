@@ -1,0 +1,59 @@
+neon核心概念：
+1. Tenant（租户）是最高级别的隔离单元，管理用户下的所有资源。每个 tenant 下可以有多个 timeline（分支）。
+2. Timeline（分支）记录一条时间线的数据历史，从某 timeline fork 出新 timeline 相当于创建了新的 branch（分叉点后的独立历史）。
+	a. timeline_id（UUID）是内部唯一标识
+3. Sharding（tenant_shard）为了扩展，tenant 的数据可分配到若干 tenant_shard。
+	a. storage_controller 维护 tenant_shards 表（包含 shard_count、shard_number、placement_policy、generation 等）
+	b. pageserver 以 tenant_shard 为单位管理 timeline 的数据，方便多pageserver 集群管理。
+
+neon各服务介绍：
+1. neon_local（本地控制平面 CLI），本地的管理工具 / 入口（control_plane 的二进制）。解析命令（如 cargo neon timeline branch）、并调用下游服务执行。
+2. storage-controller（存储端控制平面）
+	○ 接受来自 neon_local（和其他控制平面客户端）的请求（比如创建 timeline、分配 shard、管理元数据）。
+	○ 内部协调 safekeeper（WAL 存储）和 pageserver（数据/页面服务），并调用对应的 pageserver/safekeeper API 去创建 timeline 等操作。
+3. storage-broker / broker（推送订阅模式），用于组件之间的通信 / 事件广播 / 上下文传递，避免多节点之间 2^n 连接。
+	○ safekeeper 周期性 publish SafekeeperTimelineInfo，pageserver/其它节点 subscribe。
+	○ broker 不承载 WAL 数据流本身，也不负责把数据从一个 safekeeper 推给另一个 safekeeper。只用于发现和选择拉取源。
+4. pageserver（页面服务）
+	○ 存储数据层、回放 WAL、处理 timeline、对 compute（Postgres）提供页面读取。
+	○ 暴露管理 API（用于 timeline create/list 等）。
+5. safekeeper（WAL keepers）
+	○ 存储 WAL 段并通过 quorum 协议保证 WAL 的可用性。
+	○ 创建 timeline 时需要在 safekeepers 上初始化元信息（control file 等）。
+6. proxy（连接/路由代理，可选）
+	○ 连接管理/路由客户连接到合适的 compute endpoint。
+	○ 连接池、权限控制等其他与连接相关功能。
+7. compute endpoint（Postgres 实例）
+	○ 运行带有 neon 扩展的 PostgreSQL，把 WAL / page IO 发向 pageserver & safekeeper（通过 neon extension 与 pageserver/safekeeper 协作）。
+8. endpoint-storage / 其他辅助组件（可选）
+	○ 本地的 endpoint-storage 服务或其它实验/测试用服务。
+9. storage_scrubber， 清理程序，清理不再需要或已标记为删除的存储数据、清理本地/对象存储中的遗留/孤立文件、并暴露相应的度量/日志以便监控。
+
+创建分支流程：
+1. 控制平面解析创建分支命令，调用 storage-controller 服务 API接口。StorageController::from_env(env).tenant_timeline_create(...)
+2. storage-controller 的 HTTP handler 接收请求并调用 service.tenant_timeline_create 。
+	○ 调用 pageserver client 在对应 tenant_shard 上发起 timeline_create 请求。
+	○ 与 safekeeper 集群同步 timeline 元信息（safekeeper quorum create）
+3. storage-controller 的 HTTP handler 接收请求并调用当前包下得服务 service.tenant_timeline_create 。
+	○ 内部进一步调用 tenant_timeline_create_pageservers，tenant_timeline_create_safekeepers。
+	○ 内部通过 PageserverClient 的 timeline_create 请求 pageserver 服务创建timeline。
+	○ 内部通过 tenant_timeline_safekeeper_op_quorum -->  tenant_timeline_safekeeper_op，请求各个safekeeper 以 quorum 方式创建timeline。
+4. pageserver 对外暴露的 api 接口，接受请求，在 tenant 上执行 create_timeline，成功后返回 TimelineInfo（包含 last_record_lsn 等）
+5. safekeeper 收到 create 请求时在自己全局 timelines map 中创建/初始化对应 timeline 的元数据，以便后续接收 WAL。http/routes.rs、timelines_global_map.rs等实现。
+
+建立连接流程：
+1. 客户端与proxy交互，发送建立连接的信息，里面会包含 endpoint/branch/tenant。
+2. Proxy会解析交互信息，构建ComputeUserInfo（endpoint/branch/other options），用于权限检查和后续 wake_compute 请求。
+3. Proxy 调用控制平面获取一个可用的 compute（可能直接从节点池中返回可用的节点，或者新创建/唤醒一个节点）。
+4. Proxy 根据拿到的信息，建立到 compute 的连接（connect_to_compute），并将验证信息透传到计算节点进行认证。
+5. 认证完成即客户端与计算节点建立了会话，计算节点在创建的时候就关联到对应的 tenant/timeline，后续 SQL 就直接在通过会话发送到计算节点执行。
+
+数据写入流程：
+1. 客户端发 SQL 到 Postgres（compute）。pg计算节点完成解析/执行，产生page修改修改，以及对应的 WAL 记录。
+2. 计算节点上，Neon 的 Postgres 扩展（pgxn/neon）hook实现 把 WAL 发向 safekeeper 集群（WAL 持久化点）并按策略等待 ack。
+3. safekeeper 接收并持久化 WAL，维护timeline的原信息，并与其他 safekeeper 协调达成quorum。safekeeper 返回 ack。
+4. pageserver 从safekeeper 拉取 WAL，并应用到对应 timeline 的页面层中，更新 timeline 的 last_record_lsn 等元信息并持久化页面层。
+	a. 每个safekeeper 都会周期性地把维持的 tenant/timeline 的最新状态发布到 storage_broker 上。
+	b. pageserver 订阅 storage_broker，基于发布的信息选择最合适的safekeeper来拉取WAL。
+	c. 控制平面中timeline的元信息里也会有safekeeper列表，如果broker不可用，则从这里获取safekeeper去拉取WAL。
+5. Postgres 在收到所需的 WAL ack 后完成事务 commit。后续读/恢复等操作由 pageserver 提供历史页面与 time-travel 功能。
