@@ -1,0 +1,26 @@
+A Comparative Performance & Metadata Study of Open Table Formats: Iceberg vs Delta vs Hudi at Scale
+Scalable Metadata Management in Data Lakes: The Role of Apache Iceberg
+Metadata Management in Data Lake Environments: A Survey
+Revisiting data lakes: The metadata lake
+Research on metadata management of data lake
+An overview of current data lake architecture models
+Towards a More Generic and Elastic Metadata Management Model in a Data Lake Environment
+Metadata management framework for business intelligence driven data lakes
+A performance comparison of data lake table formats in cloud object storages
+Proposed Metadata Management Model for Data Lakehouse
+Data Ingestions as a Service (DIaaS): A Unified Interface for Heterogeneous Data Ingestion, Transformation, and Metadata Management for Data Lake
+Data lakes: A survey of functions and systems
+Data lakes: A survey of concepts and architectures
+
+Scalable Metadata Management in Data Lakes Using Machine Learning
+Machine Learning Models for Scalable Metadata Management in Data Lakes
+Data lake management using topic modeling techniques
+
+https://lakefs.io/blog/metadata-management-data-lakes-challenges/
+https://medium.com/@goyalarchana17/think-metadata-first-architect-metadata-driven-data-lakes-with-these-8-golden-rules-5e0e3524b2a4
+https://atlan.com/data-lake-metadata-management/
+https://www.meegle.com/en_us/topics/data-lake/data-lake-metadata-management
+
+https://dzone.com/articles/metadata-not-data-volume-is-the-real-bottleneck-in
+
+https://github.com/yanzhao-irit/data-lake-metadata-management-system
